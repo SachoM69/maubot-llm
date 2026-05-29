@@ -7,7 +7,7 @@ from typing import Type
 from maubot_llm.backends import Backend, BasicOpenAIBackend
 from maubot_llm import db
 from mautrix.util.async_db import UpgradeTable
-
+from mautrix.client import Client as MatrixClient, SyncStream
 
 class Config(BaseProxyConfig):
     def do_update(self, helper: ConfigUpdateHelper) -> None:
@@ -15,10 +15,27 @@ class Config(BaseProxyConfig):
         helper.copy("default_backend")
         helper.copy("backends")
 
+class LlmCancellationToken():
+    def __init__(self):
+        self.cancellation_requested = False
+        self.dependent_query = None
+
+    def set_query(self, query):
+        self.dependent_query = query
+
+    def cancel(self):
+        if (self.dependent_query):
+            self.dependent_query.cancel()
+        self.cancellation_requested = True
+
+    def is_cancellation_requested(self):
+        return self.cancellation_requested
+
 
 class LlmBot(Plugin):
     async def start(self) -> None:
         self.config.load_and_update()
+        self.in_flight = {}
     
     def is_allowed(self, sender: str) -> bool:
         if self.config["allowlist"] == False:
@@ -83,6 +100,11 @@ class LlmBot(Plugin):
         else:
             items.append("- System Prompt not specified")
         items.append(f"- Context Message Count: {len(context)}")
+        request = self.in_flight.get(evt.room_id, None)
+        if request:
+            items.append("- A request is in-flight for this room")
+        else:
+            items.append("- No requests in-flight for this room")
         msg = "\n".join(items)
         await evt.reply(msg)
     
@@ -140,29 +162,61 @@ class LlmBot(Plugin):
         await db.clear_context(self.database, evt.room_id)
         await evt.react("✅")
 
+    @llm_command.subcommand(help="Interrupt the current in-flight request.")
+    async def cancel(self, evt: MessageEvent) -> None:
+        if not self.is_allowed(evt.sender):
+            self.log.warn(f"stranger danger: sender={evt.sender}")
+            return
+        request = self.in_flight.get(evt.room_id, None)
+        if request:
+            request.cancel()
+            self.in_flight[evt.room_id] = None
+            await evt.react("✅")
+            await self.client.set_typing(evt.room_id, 0)
+        else:
+            await evt.react("idle")
+
     @event.on(EventType.ROOM_MESSAGE)
     async def handle_msg(self, evt: MessageEvent) -> None:
+        if evt.sender == self.client.mxid:
+            await db.append_context(self.database, evt.room_id, "assistant", evt.content.body)
+            return
+            
         if not self.is_allowed(evt.sender):
             self.log.warn(f"stranger danger: sender={evt.sender}")
             return
         if evt.content.body.startswith("!"):
             return
+
+        # if a request is in flight, cancel it
+        old_token = self.in_flight.get(evt.room_id, None)
+        if old_token:
+            old_token.cancel()
+        my_token = LlmCancellationToken()
+        self.in_flight[evt.room_id] = my_token
+
         room = await self.get_room(evt.room_id)
         await db.append_context(self.database, room.room_id, "user", evt.content.body)
         await evt.mark_read()
+        if (my_token.is_cancellation_requested()): return
         # TODO: refresh the typing indicator if generation takes longer
         # (or, alternatively, set a timeout for generation)
-        await self.client.set_typing(evt.room_id, 30000)
         try:
             backend = self.get_backend(room)
             model = room.model or backend.default_model
             system = room.system_prompt or backend.default_system_prompt
             context = await db.fetch_context(self.database, room.room_id)
-            completion = await backend.create_chat_completion(self.http, context=context, system=system, model=model)
-            await db.append_context(self.database, room.room_id, completion.message["role"], completion.message["content"])
+
+            await self.client.set_typing(evt.room_id, 300000)
+            request = backend.create_chat_completion(self.http, context=context, system=system, model=model)
+            my_token.set_query(request)
+            if (my_token.is_cancellation_requested()): return
+            completion = await request.resolve()
+            if (my_token.is_cancellation_requested()): return
             await evt.respond(completion.message["content"])
         finally:
-            await self.client.set_typing(evt.room_id, 0)
+            if (not my_token.is_cancellation_requested()):
+                await self.client.set_typing(evt.room_id, 0)
     
     @classmethod
     def get_db_upgrade_table(cls) -> UpgradeTable | None:
