@@ -207,6 +207,12 @@ class LlmBot(Plugin):
         if not self.is_allowed(evt.sender):
             self.log.warn(f"stranger danger: sender={evt.sender}")
             return
+        
+        user_name = ""
+        mems = await self.client.get_joined_members(evt.room_id)
+        member = mems.get(evt.sender, None)
+        if member:
+            user_name += "\n<username>" + member.displayname + "</username>"
 
         # if a request is in flight, cancel it
         old_token = self.in_flight.get(evt.room_id, None)
@@ -216,7 +222,7 @@ class LlmBot(Plugin):
         self.in_flight[evt.room_id] = my_token
 
         room = await self.get_room(evt.room_id)
-        await db.append_context(self.database, room.room_id, "user", evt.content.body)
+        await db.append_context(self.database, room.room_id, "user", evt.content.body + user_name)
         await evt.mark_read()
         if (my_token.is_cancellation_requested()): return
         # TODO: refresh the typing indicator if generation takes longer
@@ -233,6 +239,7 @@ class LlmBot(Plugin):
             if (my_token.is_cancellation_requested()): return
             completion = await request.resolve()
             if (my_token.is_cancellation_requested()): return
+            if (completion.message["content"] in ['-', '—']): return
             await evt.respond(completion.message["content"])
         finally:
             if (not my_token.is_cancellation_requested()):

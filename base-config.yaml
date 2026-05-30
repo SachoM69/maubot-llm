@@ -7,4 +7,4 @@ backends:
     base_url: "http://localhost:1234"
     authorization: null
     default_model: null
-    default_system_prompt: "You are helpful digital assistant."
+    default_system_prompt: "You are helpful digital assistant. You are participating in a multi-user chat room. Only answer when directly addressed, otherwise write '-'."
