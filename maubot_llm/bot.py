@@ -64,6 +64,11 @@ class LlmBot(Plugin):
             return BasicOpenAIBackend(cfg)
         raise ValueError(f"unknown backend type {cfg['type']}")
     
+    @command.new(name="llm-out")
+    @command.argument("prompt", pass_raw=True)
+    def llm_out_command(self, evt: MessageEvent, prompt: str) -> None:
+        pass
+
     @command.new(name="llm", require_subcommand=True)
     async def llm_command(self, evt: MessageEvent) -> None:
         pass
@@ -85,6 +90,7 @@ class LlmBot(Plugin):
             pass
 
         items = []
+        items.append("!llm-out")
         items.append(f"- Backend: {backend.cfg['key']} (available: {all_backends})")
         if room.model:
             items.append(f"- Model: {room.model}")
@@ -116,7 +122,7 @@ class LlmBot(Plugin):
             return
         if key not in self.config["backends"].keys():
             all_backends = ", ".join(self.config["backends"].keys())
-            msg = f"Invalid backend. Available backends: {all_backends}"
+            msg = f"!llm-out Invalid backend. Available backends: {all_backends}"
             await evt.reply(msg)
             return
         room = await self.get_room(evt.room_id)
@@ -147,6 +153,13 @@ class LlmBot(Plugin):
             return
         # TODO validate model when the backend supports it
         room = await self.get_room(evt.room_id)
+
+        mentions = evt.content.get("m.mentions")
+        if mentions:
+            ids = mentions.get("user_ids")
+            if self.client.mxid not in ids:
+                return
+
         if prompt == "-":
             room.system_prompt = None
         else:
@@ -178,14 +191,15 @@ class LlmBot(Plugin):
 
     @event.on(EventType.ROOM_MESSAGE)
     async def handle_msg(self, evt: MessageEvent) -> None:
+        if evt.content.body.startswith("!"):
+            return
+        
         if evt.sender == self.client.mxid:
             await db.append_context(self.database, evt.room_id, "assistant", evt.content.body)
             return
             
         if not self.is_allowed(evt.sender):
             self.log.warn(f"stranger danger: sender={evt.sender}")
-            return
-        if evt.content.body.startswith("!"):
             return
 
         # if a request is in flight, cancel it
