@@ -214,6 +214,13 @@ class LlmBot(Plugin):
         if member:
             user_name += "\n<username>" + member.displayname + "</username>"
 
+        mentions = evt.content.get("m.mentions")
+        if mentions:
+            ids = mentions.get("user_ids")
+            if self.client.mxid not in ids:
+                await db.append_context(self.database, evt.room_id, "user", evt.content.body + user_name)
+                return
+
         # if a request is in flight, cancel it
         old_token = self.in_flight.get(evt.room_id, None)
         if old_token:
