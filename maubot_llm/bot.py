@@ -167,12 +167,18 @@ class LlmBot(Plugin):
         await db.upsert_room(self.database, room)
         await evt.react("✅")
 
-    @llm_command.subcommand(help="Forget all context and treat subsequent messages as part of a new chat with the LLM.")
+    @llm_command.subcommand(help="Forget all context and treat subsequent messages as part of a new chat with the LLM. Also cancels the current in-flight request.")
     async def clear(self, evt: MessageEvent) -> None:
         if not self.is_allowed(evt.sender):
             self.log.warn(f"stranger danger: sender={evt.sender}")
             return
         await db.clear_context(self.database, evt.room_id)
+
+        request = self.in_flight.get(evt.room_id, None)
+        if request:
+            request.cancel()
+            self.in_flight[evt.room_id] = None
+
         await evt.react("✅")
 
     @llm_command.subcommand(help="Interrupt the current in-flight request.")
