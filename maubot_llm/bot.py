@@ -246,8 +246,13 @@ class LlmBot(Plugin):
             if (my_token.is_cancellation_requested()): return
             completion = await request.resolve()
             if (my_token.is_cancellation_requested()): return
-            if (completion.message["content"] in ['-', '—']): return
+            if (completion.message["content"] in ['-', '—']):
+                await evt.react("💤")
+                return
             await evt.respond(completion.message["content"])
+        except Exception as e:
+            self.log.error(f'[maubot_llm] [handle_msg] {e}')
+            raise
         finally:
             if (not my_token.is_cancellation_requested()):
                 await self.client.set_typing(evt.room_id, 0)
