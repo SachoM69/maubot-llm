@@ -251,7 +251,7 @@ class LlmBot(Plugin):
 
     async def complete_with_tools(self, evt: MessageEvent, backend, model, system, context, cancellation_token) -> None:
         is_message_complete = False
-        message_content = ''
+        message_parts = []
         while not is_message_complete:
             await self.client.set_typing(evt.room_id, 30000)
             if (cancellation_token.is_cancellation_requested()): return
@@ -264,8 +264,12 @@ class LlmBot(Plugin):
                 code = response.get("code", None)
                 type = response.get("type", None)
                 self.log.error(f'[maubot_llm] {code} {type}. {error}')
+                return
+            
             prime_choice = response["choices"][0]
-            message_content += prime_choice["message"]["content"]
+            if prime_choice["message"]["content"] in ['-', '—', '']:
+                break
+            message_parts.append(prime_choice["message"]["content"])
             if prime_choice["finish_reason"] != "tool_calls":
                 is_message_complete = True
             else:
@@ -277,13 +281,14 @@ class LlmBot(Plugin):
                         if params["name"] == "react":
                             tool_args = json.loads(params["arguments"])
                             await evt.react(tool_args["key"])
-                    context.append({"role":"tool", "tool_call_id": call["id"], "content": "Task was done successfully"})
+                            context.append({"role":"tool", "tool_call_id": call["id"], "content": "Reaction was sent successfully"})
 
 
-        if (message_content in ['-', '—', '']):
+        response_text = "\n".join(message_parts)
+        if (response_text in ['-', '—', '']):
             await evt.react("💤")
         else:
-            await evt.respond(message_content)
+            await evt.respond(response_text)
 
     
     known_tools = [
