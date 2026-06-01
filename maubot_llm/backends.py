@@ -18,19 +18,23 @@ class AsyncChatCompletion:
     def cancel(self):
         self.request.close()
         pass
-
+    
     async def resolve(self) -> ChatCompletion:
+        respbody = await self.resolve_request()
+        choice = respbody["choices"][0]
+        return ChatCompletion(
+            message=choice["message"],
+            finish_reason=choice["finish_reason"],
+            model=choice.get("model", None)
+        )
+
+    async def resolve_request(self) -> dict:
         hit_except = False
 
         try:
             resp = await self.request.__aenter__()
             respbody = await resp.json()
-            choice = respbody["choices"][0]
-            return ChatCompletion(
-                message=choice["message"],
-                finish_reason=choice["finish_reason"],
-                model=choice.get("model", None)
-            )
+            return respbody
         except:
             hit_except = True
             if not await self.request.__aexit__(*sys.exc_info()):
@@ -58,13 +62,15 @@ class BasicOpenAIBackend(Backend):
         self.base_url = cfg["base_url"]
         self.authorization = cfg["authorization"]
     
-    def create_chat_completion(self, http: ClientSession,  context: List[dict], system: Optional[str] = None, model: Optional[str] = None) -> AsyncChatCompletion:
+    def create_chat_completion(self, http: ClientSession,  context: List[dict], system: Optional[str] = None, model: Optional[str] = None, tools: List[dict] | None = None) -> AsyncChatCompletion:
         url = f"{self.base_url}/v1/chat/completions"
         reqbody = {"messages": context}
         if system is not None:
             reqbody["messages"].insert(0, {"role": "system", "content": system})
         if model is not None:
             reqbody["model"] = model
+        if tools is not None:
+            reqbody["tools"] = tools
         headers = {}
         if self.authorization is not None:
             headers["Authorization"] = self.authorization

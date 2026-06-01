@@ -8,6 +8,7 @@ from maubot_llm.backends import Backend, BasicOpenAIBackend
 from maubot_llm import db
 from mautrix.util.async_db import UpgradeTable
 from mautrix.client import Client as MatrixClient, SyncStream
+import json
 
 class Config(BaseProxyConfig):
     def do_update(self, helper: ConfigUpdateHelper) -> None:
@@ -240,22 +241,72 @@ class LlmBot(Plugin):
             system = room.system_prompt or backend.default_system_prompt
             context = await db.fetch_context(self.database, room.room_id)
 
-            await self.client.set_typing(evt.room_id, 300000)
-            request = backend.create_chat_completion(self.http, context=context, system=system, model=model)
-            my_token.set_query(request)
-            if (my_token.is_cancellation_requested()): return
-            completion = await request.resolve()
-            if (my_token.is_cancellation_requested()): return
-            if (completion.message["content"] in ['-', '—']):
-                await evt.react("💤")
-                return
-            await evt.respond(completion.message["content"])
+            await self.complete_with_tools(evt, backend, model, system, context, my_token)
         except Exception as e:
             self.log.error(f'[maubot_llm] [handle_msg] {e}')
             raise
         finally:
             if (not my_token.is_cancellation_requested()):
                 await self.client.set_typing(evt.room_id, 0)
+
+    async def complete_with_tools(self, evt: MessageEvent, backend, model, system, context, cancellation_token) -> None:
+        is_message_complete = False
+        message_content = ''
+        while not is_message_complete:
+            await self.client.set_typing(evt.room_id, 30000)
+            if (cancellation_token.is_cancellation_requested()): return
+            request = backend.create_chat_completion(self.http, context=context, system=system, model=model, tools=self.known_tools)
+            cancellation_token.set_query(request)
+            response = await request.resolve_request()
+            if (cancellation_token.is_cancellation_requested()): return
+            if (response.get("choices", None) == None):
+                error = response.get("message", None)
+                code = response.get("code", None)
+                type = response.get("type", None)
+                self.log.error(f'[maubot_llm] {code} {type}. {error}')
+            prime_choice = response["choices"][0]
+            message_content += prime_choice["message"]["content"]
+            if prime_choice["finish_reason"] != "tool_calls":
+                is_message_complete = True
+            else:
+                context.append(prime_choice["message"])
+                tool_calls = prime_choice["message"]["tool_calls"]
+                for call in tool_calls:
+                    if call["type"] == "function":
+                        params = call["function"]
+                        if params["name"] == "react":
+                            tool_args = json.loads(params["arguments"])
+                            await evt.react(tool_args["key"])
+                    context.append({"role":"tool", "tool_call_id": call["id"], "content": "Task was done successfully"})
+
+
+        if (message_content in ['-', '—', '']):
+            await evt.react("💤")
+        else:
+            await evt.respond(message_content)
+
+    
+    known_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "react",
+                "description": "React to the message with the given key. The key can be arbitrary unicode text, but usually reactions are emojis.",
+                "parameters": {
+                    "properties": {
+                        "key": {
+                            "description": "Reaction key",
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "key"
+                    ],
+                    "type": "object"
+                }
+            }
+        },
+    ]    
     
     @classmethod
     def get_db_upgrade_table(cls) -> UpgradeTable | None:
