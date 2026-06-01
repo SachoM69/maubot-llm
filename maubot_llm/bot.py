@@ -9,6 +9,7 @@ from maubot_llm import db
 from mautrix.util.async_db import UpgradeTable
 from mautrix.client import Client as MatrixClient, SyncStream
 import json
+import datetime
 
 class Config(BaseProxyConfig):
     def do_update(self, helper: ConfigUpdateHelper) -> None:
@@ -37,6 +38,7 @@ class LlmBot(Plugin):
     async def start(self) -> None:
         self.config.load_and_update()
         self.in_flight = {}
+        self.is_tool_debug = False
     
     def is_allowed(self, sender: str) -> bool:
         if self.config["allowlist"] == False:
@@ -181,6 +183,16 @@ class LlmBot(Plugin):
             self.in_flight[evt.room_id] = None
 
         await evt.react("✅")
+        
+    @llm_command.subcommand(help="Enable/disable output of tool results directly into chat.")
+    @command.argument("enable")
+    async def tool_debug(self, evt: MessageEvent, enable : bool) -> None:
+        if not self.is_allowed(evt.sender):
+            self.log.warn(f"stranger danger: sender={evt.sender}")
+            return
+        
+        self.is_tool_debug = enable
+        await evt.react("✅")
 
     @llm_command.subcommand(help="Interrupt the current in-flight request.")
     async def cancel(self, evt: MessageEvent) -> None:
@@ -250,9 +262,8 @@ class LlmBot(Plugin):
                 await self.client.set_typing(evt.room_id, 0)
 
     async def complete_with_tools(self, evt: MessageEvent, backend, model, system, context, cancellation_token) -> None:
-        is_message_complete = False
         message_parts = []
-        while not is_message_complete:
+        while True:
             await self.client.set_typing(evt.room_id, 30000)
             if (cancellation_token.is_cancellation_requested()): return
             request = backend.create_chat_completion(self.http, context=context, system=system, model=model, tools=self.known_tools)
@@ -267,29 +278,50 @@ class LlmBot(Plugin):
                 return
             
             prime_choice = response["choices"][0]
-            if prime_choice["message"]["content"] in ['-', '—', '']:
+            if prime_choice["message"]["content"] in ['💤', ''] and prime_choice["finish_reason"] != "tool_calls":
                 break
             message_parts.append(prime_choice["message"]["content"])
             if prime_choice["finish_reason"] != "tool_calls":
-                is_message_complete = True
-            else:
-                context.append(prime_choice["message"])
-                tool_calls = prime_choice["message"]["tool_calls"]
-                for call in tool_calls:
-                    if call["type"] == "function":
-                        params = call["function"]
-                        if params["name"] == "react":
-                            tool_args = json.loads(params["arguments"])
-                            await evt.react(tool_args["key"])
-                            context.append({"role":"tool", "tool_call_id": call["id"], "content": "Reaction was sent successfully"})
+                break
+
+            context.append(prime_choice["message"])
+            tool_calls = prime_choice["message"]["tool_calls"]
+            for call in tool_calls:
+                if call["type"] != "function":
+                    self.log.info(f'[maubot_llm] [complete_with_tools] Wrong tool type! Got {call["type"]}, expected function')
+                    continue
+                try:
+                    self.log.info(f'calling tool')
+                    params = call["function"]
+                    self.log.info(params)
+                    tool_args = json.loads(params["arguments"])
+                    tool_result = await self.call_tool(evt, params["name"], call["id"], tool_args)
+                    self.log.info(tool_result)
+
+                    if tool_result:
+                        context.append(tool_result)
+
+                        if self.is_tool_debug:
+                            await evt.respond("!llm-tool-out: " + str(tool_result))
+                except Exception as exc:
+                    self.log.error(f'[maubot_llm] [tool_call] {exc}')
 
 
         response_text = "\n".join(message_parts)
-        if (response_text in ['-', '—', '']):
+        if (response_text in ['💤', '']):
             await evt.react("💤")
         else:
             await evt.respond(response_text)
 
+    async def call_tool(self, evt: MessageEvent, tool_name, call_id, args):
+        tool_result = None
+        if tool_name == "react":
+            await evt.react(args["key"])
+            tool_result = {"role":"tool", "tool_call_id": call_id, "content": "Reaction was sent successfully"}
+        elif tool_name == "get_current_datetime":
+            now = datetime.datetime.now()
+            tool_result = {"role":"tool", "tool_call_id": call_id, "content": f'{{\"current_timestamp\": {now.timestamp()}, \"current_iso\": \"{now.astimezone(datetime.timezone.utc).isoformat()}\", \"user_local_iso\": \"{now.astimezone().isoformat()}\", \"user_timezone\": \"{now.astimezone().tzname()}\"}}'}
+        return tool_result
     
     known_tools = [
         {
@@ -307,6 +339,17 @@ class LlmBot(Plugin):
                     "required": [
                         "key"
                     ],
+                    "type": "object"
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_current_datetime",
+                "description": "Get the current date, time and timezone.",
+                "parameters": {
+                    "properties": {},
                     "type": "object"
                 }
             }
