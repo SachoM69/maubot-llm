@@ -10,6 +10,7 @@ from mautrix.util.async_db import UpgradeTable
 from mautrix.client import Client as MatrixClient, SyncStream
 import json
 import datetime
+from html.parser import HTMLParser
 
 class Config(BaseProxyConfig):
     def do_update(self, helper: ConfigUpdateHelper) -> None:
@@ -321,6 +322,18 @@ class LlmBot(Plugin):
         elif tool_name == "get_current_datetime":
             now = datetime.datetime.now()
             tool_result = {"role":"tool", "tool_call_id": call_id, "content": f'{{\"current_timestamp\": {now.timestamp()}, \"current_iso\": \"{now.astimezone(datetime.timezone.utc).isoformat()}\", \"user_local_iso\": \"{now.astimezone().isoformat()}\", \"user_timezone\": \"{now.astimezone().tzname()}\"}}'}
+        elif tool_name == "fetch_url":
+            url = args["url"]
+            html_custom_headers = {"User-Agent": "WhatsApp/2"}
+            resp = await self.http.get(url, timeout=30, headers=html_custom_headers)
+            if resp.status != 200:
+                tool_result = {"role":"tool", "tool_call_id": call_id, "content": f'{{\"error\": \"{resp.status} {resp.reason}\"}}'}
+            else:
+                cont = await resp.text()
+                parser = ExtractMetaTags()
+                parser.feed(cont)
+                tool_result = {"role":"tool", "tool_call_id": call_id, "content": f'{{\"status\": \"success\", \"text\": \"{parser.result}\"}}'}
+
         return tool_result
     
     known_tools = [
@@ -346,6 +359,25 @@ class LlmBot(Plugin):
         {
             "type": "function",
             "function": {
+                "name": "fetch_url",
+                "description": "Load the url contents",
+                "parameters": {
+                    "properties": {
+                        "url": {
+                            "description": "The address to fetch",
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "url"
+                    ],
+                    "type": "object"
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "get_current_datetime",
                 "description": "Get the current date, time and timezone.",
                 "parameters": {
@@ -359,3 +391,20 @@ class LlmBot(Plugin):
     @classmethod
     def get_db_upgrade_table(cls) -> UpgradeTable | None:
         return db.upgrade_table
+
+class ExtractMetaTags(HTMLParser):
+    def __init__(self):
+        HTMLParser.__init__(self)
+        self.result = ""
+        self.current_tag = ""
+
+    def handle_starttag(self, tag, attrs):
+        self.current_tag = tag
+        # if tag not in ["path", "g", "symbol", "div", "span"]:
+        #     self.result += f'{tag}: {attrs}\n'
+            
+    def handle_data(self, data):
+        if (self.current_tag == "script"): return
+        data = data.strip()
+        if len(data):
+            self.result += f'{data}\n'
