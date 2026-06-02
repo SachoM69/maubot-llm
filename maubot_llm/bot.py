@@ -17,6 +17,7 @@ class Config(BaseProxyConfig):
         helper.copy("allowlist")
         helper.copy("default_backend")
         helper.copy("backends")
+        helper.copy("debug_tools")
 
 class LlmCancellationToken():
     def __init__(self):
@@ -39,7 +40,6 @@ class LlmBot(Plugin):
     async def start(self) -> None:
         self.config.load_and_update()
         self.in_flight = {}
-        self.is_tool_debug = False
     
     def is_allowed(self, sender: str) -> bool:
         if self.config["allowlist"] == False:
@@ -185,16 +185,6 @@ class LlmBot(Plugin):
 
         await evt.react("✅")
         
-    @llm_command.subcommand(help="Enable/disable output of tool results directly into chat.")
-    @command.argument("enable")
-    async def tool_debug(self, evt: MessageEvent, enable : bool) -> None:
-        if not self.is_allowed(evt.sender):
-            self.log.warn(f"stranger danger: sender={evt.sender}")
-            return
-        
-        self.is_tool_debug = enable
-        await evt.react("✅")
-
     @llm_command.subcommand(help="Interrupt the current in-flight request.")
     async def cancel(self, evt: MessageEvent) -> None:
         if not self.is_allowed(evt.sender):
@@ -294,6 +284,8 @@ class LlmBot(Plugin):
                 try:
                     self.log.info(f'calling tool')
                     params = call["function"]
+                    if self.config["debug_tools"]:
+                        await evt.respond("!llm-tool-in: `" + str(params) + "`")
                     self.log.info(params)
                     tool_args = json.loads(params["arguments"])
                     tool_result = await self.call_tool(evt, params["name"], call["id"], tool_args)
@@ -302,8 +294,11 @@ class LlmBot(Plugin):
                     if tool_result:
                         context.append(tool_result)
 
-                        if self.is_tool_debug:
-                            await evt.respond("!llm-tool-out: " + str(tool_result))
+                        if self.config["debug_tools"]:
+                            content = str(tool_result["content"])
+                            if len(content) > 100:
+                                content = content[:100] + "..."
+                            await evt.respond("!llm-tool-out: `" + content + "`")
                 except Exception as exc:
                     self.log.error(f'[maubot_llm] [tool_call] {exc}')
 
@@ -318,7 +313,7 @@ class LlmBot(Plugin):
         tool_result = None
         if tool_name == "react":
             await evt.react(args["key"])
-            tool_result = {"role":"tool", "tool_call_id": call_id, "content": "Reaction was sent successfully"}
+            tool_result = {"role":"tool", "tool_call_id": call_id, "content": "{{\"status\": \"success\", \"text\": \"Reaction was sent successfully\"}}"}
         elif tool_name == "get_current_datetime":
             now = datetime.datetime.now()
             tool_result = {"role":"tool", "tool_call_id": call_id, "content": f'{{\"current_timestamp\": {now.timestamp()}, \"current_iso\": \"{now.astimezone(datetime.timezone.utc).isoformat()}\", \"user_local_iso\": \"{now.astimezone().isoformat()}\", \"user_timezone\": \"{now.astimezone().tzname()}\"}}'}

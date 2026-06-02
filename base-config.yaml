@@ -1,6 +1,7 @@
 # Set allowlist to `false` to allow anyone; otherwise add entries such as "@user:example.com"
 allowlist: []
 default_backend: "local"
+debug_tools: false
 backends:
   local:
     type: basic_openai
