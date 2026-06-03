@@ -1,7 +1,10 @@
 # Set allowlist to `false` to allow anyone; otherwise add entries such as "@user:example.com"
 allowlist: []
 default_backend: "local"
-debug_tools: false
+tools:
+  enabled_tools: ["react", "fetch_url", "get_current_datetime"]
+  debug_messages: false
+
 backends:
   local:
     type: basic_openai

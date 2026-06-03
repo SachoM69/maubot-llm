@@ -15,10 +15,10 @@ class TestDb(unittest.IsolatedAsyncioTestCase):
         try:
             self.assertEqual(None, await fetch_room(db, "a"))
             
-            room = Room()
-            room.room_id = "a"
+            room = Room("a")
             await upsert_room(db, room)
             room = await fetch_room(db, "a")
+            self.assertIsNotNone(room)
             self.assertEqual("a", room.room_id)
             self.assertEqual(None, room.backend)
             self.assertEqual(None, room.model)

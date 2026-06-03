@@ -1,45 +1,35 @@
+from typing import Optional
 from maubot import Plugin
 from mautrix.util.config import BaseProxyConfig, ConfigUpdateHelper
 from maubot import Plugin, MessageEvent
 from maubot.handlers import command, event
-from mautrix.types import EventType, MessageEvent
+from mautrix.types import EventType
+from mautrix.types.primitive import RoomID
 from typing import Type
-from maubot_llm.backends import Backend, BasicOpenAIBackend
 from maubot_llm import db
 from mautrix.util.async_db import UpgradeTable
 from mautrix.client import Client as MatrixClient, SyncStream
-import json
-import datetime
-from html.parser import HTMLParser
+from .tool_holder import get_default_tool_holder, LLMToolHolder
+from .backends import Backend, BasicOpenAIBackend
+from .cancellation_token import LlmCancellationToken
+from .message_builder import MessageBuilder
 
 class Config(BaseProxyConfig):
     def do_update(self, helper: ConfigUpdateHelper) -> None:
         helper.copy("allowlist")
         helper.copy("default_backend")
         helper.copy("backends")
-        helper.copy("debug_tools")
-
-class LlmCancellationToken():
-    def __init__(self):
-        self.cancellation_requested = False
-        self.dependent_query = None
-
-    def set_query(self, query):
-        self.dependent_query = query
-
-    def cancel(self):
-        if (self.dependent_query):
-            self.dependent_query.cancel()
-        self.cancellation_requested = True
-
-    def is_cancellation_requested(self):
-        return self.cancellation_requested
-
+        helper.copy_dict("tools")
 
 class LlmBot(Plugin):
     async def start(self) -> None:
         self.config.load_and_update()
         self.in_flight = {}
+        self.tool_holder = get_default_tool_holder(self.log)
+        self.message_builder = MessageBuilder(self.tool_holder)
+
+    in_flight: dict[RoomID, Optional[LlmCancellationToken]]
+    tool_holder: LLMToolHolder
     
     def is_allowed(self, sender: str) -> bool:
         if self.config["allowlist"] == False:
@@ -50,11 +40,10 @@ class LlmBot(Plugin):
     def get_config_class(cls) -> Type[BaseProxyConfig]:
         return Config
     
-    async def get_room(self, room_id: str) -> db.Room:
+    async def get_room(self, room_id: RoomID) -> db.Room:
         room = await db.fetch_room(self.database, room_id)
         if room is None:
-            room = db.Room()
-            room.room_id = room_id
+            room = db.Room(room_id)
             await db.upsert_room(self.database, room)
         return room
     
@@ -244,162 +233,19 @@ class LlmBot(Plugin):
             system = room.system_prompt or backend.default_system_prompt
             context = await db.fetch_context(self.database, room.room_id)
 
-            await self.complete_with_tools(evt, backend, model, system, context, my_token)
+            tool_cfg = self.config["tools"]
+
+            await self.message_builder.build_with_tools(evt, self.http, self.client, self.log,
+                                                        backend, model, system, context,
+                                                        tool_cfg["enabled_tools"], tool_cfg["debug_messages"], my_token)
         except Exception as e:
             self.log.error(f'[maubot_llm] [handle_msg] {e}')
             raise
         finally:
             if (not my_token.is_cancellation_requested()):
                 await self.client.set_typing(evt.room_id, 0)
-
-    async def complete_with_tools(self, evt: MessageEvent, backend, model, system, context, cancellation_token) -> None:
-        message_parts = []
-        while True:
-            await self.client.set_typing(evt.room_id, 30000)
-            if (cancellation_token.is_cancellation_requested()): return
-            request = backend.create_chat_completion(self.http, context=context, system=system, model=model, tools=self.known_tools)
-            cancellation_token.set_query(request)
-            response = await request.resolve_request()
-            if (cancellation_token.is_cancellation_requested()): return
-            if (response.get("choices", None) == None):
-                error = response.get("message", None)
-                code = response.get("code", None)
-                type = response.get("type", None)
-                self.log.error(f'[maubot_llm] {code} {type}. {error}')
-                return
-            
-            prime_choice = response["choices"][0]
-            if prime_choice["message"]["content"] in ['💤', ''] and prime_choice["finish_reason"] != "tool_calls":
-                break
-            message_parts.append(prime_choice["message"]["content"])
-            if prime_choice["finish_reason"] != "tool_calls":
-                break
-
-            context.append(prime_choice["message"])
-            tool_calls = prime_choice["message"]["tool_calls"]
-            for call in tool_calls:
-                if call["type"] != "function":
-                    self.log.info(f'[maubot_llm] [complete_with_tools] Wrong tool type! Got {call["type"]}, expected function')
-                    continue
-                try:
-                    self.log.info(f'calling tool')
-                    params = call["function"]
-                    if self.config["debug_tools"]:
-                        await evt.respond("!llm-tool-in: `" + str(params) + "`")
-                    self.log.info(params)
-                    tool_args = json.loads(params["arguments"])
-                    tool_result = await self.call_tool(evt, params["name"], call["id"], tool_args)
-                    self.log.info(tool_result)
-
-                    if tool_result:
-                        context.append(tool_result)
-
-                        if self.config["debug_tools"]:
-                            content = str(tool_result["content"])
-                            if len(content) > 100:
-                                content = content[:100] + "..."
-                            await evt.respond("!llm-tool-out: `" + content + "`")
-                except Exception as exc:
-                    self.log.error(f'[maubot_llm] [tool_call] {exc}')
-
-
-        response_text = "\n".join(message_parts)
-        if (response_text in ['💤', '']):
-            await evt.react("💤")
-        else:
-            await evt.respond(response_text)
-
-    async def call_tool(self, evt: MessageEvent, tool_name, call_id, args):
-        tool_result = None
-        if tool_name == "react":
-            await evt.react(args["key"])
-            tool_result = {"role":"tool", "tool_call_id": call_id, "content": "{{\"status\": \"success\", \"text\": \"Reaction was sent successfully\"}}"}
-        elif tool_name == "get_current_datetime":
-            now = datetime.datetime.now()
-            tool_result = {"role":"tool", "tool_call_id": call_id, "content": f'{{\"current_timestamp\": {now.timestamp()}, \"current_iso\": \"{now.astimezone(datetime.timezone.utc).isoformat()}\", \"user_local_iso\": \"{now.astimezone().isoformat()}\", \"user_timezone\": \"{now.astimezone().tzname()}\"}}'}
-        elif tool_name == "fetch_url":
-            url = args["url"]
-            html_custom_headers = {"User-Agent": "WhatsApp/2"}
-            resp = await self.http.get(url, timeout=30, headers=html_custom_headers)
-            if resp.status != 200:
-                tool_result = {"role":"tool", "tool_call_id": call_id, "content": f'{{\"error\": \"{resp.status} {resp.reason}\"}}'}
-            else:
-                cont = await resp.text()
-                parser = ExtractMetaTags()
-                parser.feed(cont)
-                tool_result = {"role":"tool", "tool_call_id": call_id, "content": f'{{\"status\": \"success\", \"text\": \"{parser.result}\"}}'}
-
-        return tool_result
     
-    known_tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "react",
-                "description": "React to the message with the given key. The key can be arbitrary unicode text, but usually reactions are emojis.",
-                "parameters": {
-                    "properties": {
-                        "key": {
-                            "description": "Reaction key",
-                            "type": "string"
-                        }
-                    },
-                    "required": [
-                        "key"
-                    ],
-                    "type": "object"
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "fetch_url",
-                "description": "Load the url contents",
-                "parameters": {
-                    "properties": {
-                        "url": {
-                            "description": "The address to fetch",
-                            "type": "string"
-                        }
-                    },
-                    "required": [
-                        "url"
-                    ],
-                    "type": "object"
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "get_current_datetime",
-                "description": "Get the current date, time and timezone.",
-                "parameters": {
-                    "properties": {},
-                    "type": "object"
-                }
-            }
-        },
-    ]    
     
     @classmethod
-    def get_db_upgrade_table(cls) -> UpgradeTable | None:
+    def get_db_upgrade_table(cls) -> Optional[UpgradeTable]:
         return db.upgrade_table
-
-class ExtractMetaTags(HTMLParser):
-    def __init__(self):
-        HTMLParser.__init__(self)
-        self.result = ""
-        self.current_tag = ""
-
-    def handle_starttag(self, tag, attrs):
-        self.current_tag = tag
-        # if tag not in ["path", "g", "symbol", "div", "span"]:
-        #     self.result += f'{tag}: {attrs}\n'
-            
-    def handle_data(self, data):
-        if (self.current_tag == "script"): return
-        data = data.strip()
-        if len(data):
-            self.result += f'{data}\n'

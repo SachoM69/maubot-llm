@@ -1,17 +1,9 @@
 from typing import List, Optional
 from aiohttp import ClientSession
 import sys
+from .backend_base import ChatCompletion, AsyncChatCompletion, Backend
 
-class ChatCompletion:
-    def __init__(self, message: dict, finish_reason: str, model: Optional[str]) -> None:
-        self.message = message
-        self.finish_reason = finish_reason
-        self.model = model
-    
-    def __eq__(self, other) -> bool:
-        return self.message == other.message and self.finish_reason == other.finish_reason and self.model == other.model
-
-class AsyncChatCompletion:
+class AsyncChatCompletionImpl(AsyncChatCompletion):
     def __init__(self, request) -> None:
         self.request = request
 
@@ -43,17 +35,6 @@ class AsyncChatCompletion:
             if not hit_except:
                 await self.request.__aexit__(None, None, None)
 
-class Backend:
-    def __init__(self, cfg: dict) -> None:
-        self.cfg = cfg
-        self.default_model = cfg.get("default_model")
-        self.default_system_prompt = cfg.get("default_system_prompt")
-
-    def create_chat_completion(self, http: ClientSession,  context: List[dict], system: Optional[str] = None, model: Optional[str] = None) -> AsyncChatCompletion:
-        raise NotImplementedError()
-    
-    async def fetch_models(self, http: ClientSession) -> List[str]:
-        raise NotImplementedError()
 
 
 class BasicOpenAIBackend(Backend):
@@ -62,7 +43,7 @@ class BasicOpenAIBackend(Backend):
         self.base_url = cfg["base_url"]
         self.authorization = cfg["authorization"]
     
-    def create_chat_completion(self, http: ClientSession,  context: List[dict], system: Optional[str] = None, model: Optional[str] = None, tools: List[dict] | None = None) -> AsyncChatCompletion:
+    def create_chat_completion(self, http: ClientSession,  context: List[dict], system: Optional[str] = None, model: Optional[str] = None, tools: Optional[List[dict]] = None) -> AsyncChatCompletion:
         url = f"{self.base_url}/v1/chat/completions"
         reqbody = {"messages": context}
         if system is not None:
@@ -75,7 +56,7 @@ class BasicOpenAIBackend(Backend):
         if self.authorization is not None:
             headers["Authorization"] = self.authorization
             
-        return AsyncChatCompletion(
+        return AsyncChatCompletionImpl(
             http.post(url, headers=headers, json=reqbody,)
         )
     
