@@ -200,29 +200,26 @@ class LlmBot(Plugin):
         if not self.is_allowed(evt.sender):
             self.log.warn(f"stranger danger: sender={evt.sender}")
             return
-        
-        user_name = ""
-        mems = await self.client.get_joined_members(evt.room_id)
-        member = mems.get(evt.sender, None)
-        if member:
-            user_name += "\n<username>" + member.displayname + "</username>"
 
+        # Ignore messages that mention other users
         mentions = evt.content.get("m.mentions")
         if mentions:
             ids = mentions.get("user_ids")
             if self.client.mxid not in ids:
-                await db.append_context(self.database, evt.room_id, "user", evt.content.body + user_name)
+                await db.append_context(self.database, evt.room_id, "user", context_item_body)
                 return
 
         # if a request is in flight, cancel it
-        old_token = self.in_flight.get(evt.room_id, None)
+        old_token = self.in_flight.get(evt.room_id)
         if old_token:
             old_token.cancel()
         my_token = LlmCancellationToken()
         self.in_flight[evt.room_id] = my_token
+        
+        context_item_body = await self.prepare_user_msg(evt.room_id, evt.sender, evt.content.body)
 
         room = await self.get_room(evt.room_id)
-        await db.append_context(self.database, room.room_id, "user", evt.content.body + user_name)
+        await db.append_context(self.database, room.room_id, "user", context_item_body)
         await evt.mark_read()
         if (my_token.is_cancellation_requested()): return
         # TODO: refresh the typing indicator if generation takes longer
@@ -245,7 +242,16 @@ class LlmBot(Plugin):
             if (not my_token.is_cancellation_requested()):
                 await self.client.set_typing(evt.room_id, 0)
     
-    
     @classmethod
     def get_db_upgrade_table(cls) -> Optional[UpgradeTable]:
         return db.upgrade_table
+    
+    # Perform any useful transformations on the message body
+    async def prepare_user_msg(self, room_id: RoomID, sender, message_body : str) -> str:
+        # append the username to message, so the LLM knows who is the sender
+        mems = await self.client.get_joined_members(room_id)
+        member = mems.get(sender, None)
+        if member:
+            message_body += "\n<username>" + member.displayname + "</username>"
+
+        return message_body
