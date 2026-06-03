@@ -201,14 +201,6 @@ class LlmBot(Plugin):
             self.log.warn(f"stranger danger: sender={evt.sender}")
             return
 
-        # Ignore messages that mention other users
-        mentions = evt.content.get("m.mentions")
-        if mentions:
-            ids = mentions.get("user_ids")
-            if self.client.mxid not in ids:
-                await db.append_context(self.database, evt.room_id, "user", context_item_body)
-                return
-
         # if a request is in flight, cancel it
         old_token = self.in_flight.get(evt.room_id)
         if old_token:
@@ -218,19 +210,29 @@ class LlmBot(Plugin):
         
         context_item_body = await self.prepare_user_msg(evt.room_id, evt.sender, evt.content.body)
 
-        room = await self.get_room(evt.room_id)
-        await db.append_context(self.database, room.room_id, "user", context_item_body)
+        await db.append_context(self.database, evt.room_id, "user", context_item_body)
+
+        # Ignore messages that mention other users
+        mentions = evt.content.get("m.mentions")
+        if mentions:
+            ids = mentions.get("user_ids")
+            if self.client.mxid not in ids:
+                return
+        
         await evt.mark_read()
         if (my_token.is_cancellation_requested()): return
         # TODO: refresh the typing indicator if generation takes longer
         # (or, alternatively, set a timeout for generation)
         try:
+            room = await self.get_room(evt.room_id)
             backend = self.get_backend(room)
             model = room.model or backend.default_model
             system = room.system_prompt or backend.default_system_prompt
             context = await db.fetch_context(self.database, room.room_id)
 
             tool_cfg = self.config["tools"]
+            
+            if (my_token.is_cancellation_requested()): return
 
             await self.message_builder.build_with_tools(evt, self.http, self.client, self.log,
                                                         backend, model, system, context,
