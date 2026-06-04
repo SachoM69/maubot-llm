@@ -26,11 +26,8 @@ class LlmBot(Plugin):
     async def start(self) -> None:
         self.config.load_and_update()
         self.in_flight = {}
-        self.tool_holder = get_default_tool_holder(self.log)
-        self.message_builder = MessageBuilder(self.tool_holder)
 
     in_flight: dict[RoomID, Optional[LlmCancellationToken]]
-    tool_holder: LLMToolHolder
     
     def is_allowed(self, sender: str) -> bool:
         if self.config["allowlist"] == False:
@@ -222,8 +219,6 @@ class LlmBot(Plugin):
         
         await evt.mark_read()
         if (my_token.is_cancellation_requested()): return
-        # TODO: refresh the typing indicator if generation takes longer
-        # (or, alternatively, set a timeout for generation)
         try:
             room = await self.get_room(evt.room_id)
             backend = self.get_backend(room)
@@ -238,9 +233,10 @@ class LlmBot(Plugin):
             typing_task = asyncio.create_task(self.typing_updater(evt.room_id))
             my_token.add_task(typing_task)
 
-            build_coro = self.message_builder.build_with_tools(evt, self.http, self.log,
-                                                        backend, model, system, context,
-                                                        tool_cfg["enabled_tools"], tool_cfg["debug_messages"], my_token)
+            tool_holder = get_default_tool_holder(tool_cfg["enabled_tools"])
+            message_builder = MessageBuilder(evt, self.http, self.log,
+                                                        backend, model, system, context, tool_holder)
+            build_coro = message_builder.build_with_tools(tool_cfg["debug_messages"], my_token)
             
             build_task = asyncio.create_task(build_coro)
             my_token.add_task(build_task)

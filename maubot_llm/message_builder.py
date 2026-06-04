@@ -1,6 +1,5 @@
 ﻿from typing import Optional
 from maubot import MessageEvent
-from maubot.matrix import MaubotMatrixClient
 from logging import Logger
 import json
 from aiohttp import ClientSession
@@ -9,19 +8,31 @@ from .tool_holder import LLMToolHolder
 from .backend_base import Backend
 
 class MessageBuilder:
-    def __init__(self, tool_holder : LLMToolHolder):
+    def __init__(self, evt: MessageEvent, http: ClientSession, logger: Logger,
+                backend : Backend, model: Optional[str], system : Optional[str], context : list[dict], tool_holder : LLMToolHolder):
+        self.trigger_event = evt
+        self.http = http
+        self.logger = logger
+        self.backend = backend
+        self.model = model
+        self.system = system
+        self.context = context
         self.tool_holder = tool_holder
 
-    cfg: dict
+    trigger_event: MessageEvent
+    http: ClientSession
+    logger: Logger
+    backend : Backend
+    model: Optional[str]
+    system : Optional[str]
+    context : list[dict]
     tool_holder: LLMToolHolder
+    cancellation_token : LlmCancellationToken
     
-    async def build_with_tools(self, evt: MessageEvent, http: ClientSession, logger: Logger,
-                               backend : Backend, model: Optional[str], system : Optional[str], context : list[dict],
-                               allowed_tools: list[str] | bool, tool_debug_messages: bool,
-                               cancellation_token : LlmCancellationToken) -> None:
+    async def build_with_tools(self, tool_debug_messages: bool, token : LlmCancellationToken) -> None:
         message_parts = []
         while True:
-            response = await backend.create_chat_completion_raw(http, context=context, system=system, model=model, tools=self.tool_holder.get_descriptions(allowed_tools))
+            response = await self.backend.create_chat_completion_raw(self.http, context=self.context, system=self.system, model=self.model, tools=self.tool_holder.get_descriptions())
 
             if (response.get("choices") == None):
                 error = response.get("error")
@@ -33,8 +44,8 @@ class MessageBuilder:
                     code = error.get("code", None)
                     type = error.get("type", None)
                     err_response = f'{code} {type}. {message}'
-                logger.error(f'[maubot_llm] {err_response}')
-                await evt.respond(f'!llm-err: {err_response}')
+                self.logger.error(f'[maubot_llm] {err_response}')
+                await self.trigger_event.respond(f'!llm-err: {err_response}')
                 return
             
             prime_choice = response["choices"][0]
@@ -42,34 +53,34 @@ class MessageBuilder:
             if prime_choice["finish_reason"] != "tool_calls":
                 break
 
-            context.append(prime_choice["message"])
+            self.context.append(prime_choice["message"])
             tool_calls = prime_choice["message"]["tool_calls"]
             for call in tool_calls:
                 if call["type"] != "function":
-                    logger.info(f'[maubot_llm] [complete_with_tools] Wrong tool type! Got {call["type"]}, expected function')
+                    self.logger.info(f'[maubot_llm] [complete_with_tools] Wrong tool type! Got {call["type"]}, expected function')
                     continue
 
-                logger.info(f'calling tool')
+                self.logger.info(f'calling tool')
                 params = call["function"]
                 if tool_debug_messages:
-                    await evt.respond("!llm-tool-in: `" + str(params) + "`")
-                logger.info(params)
+                    await self.trigger_event.respond("!llm-tool-in: `" + str(params) + "`")
+                self.logger.info(params)
                 tool_args = json.loads(params["arguments"])
-                tool_result = await self.tool_holder.call_tool(params["name"], call["id"], evt, http, tool_args, cancellation_token)
-                logger.info(tool_result)
+                tool_result = await self.tool_holder.call_tool(params["name"], call["id"], self, tool_args, token)
+                self.logger.info(tool_result)
 
                 if tool_result:
-                    context.append(tool_result)
+                    self.context.append(tool_result)
 
                     if tool_debug_messages:
                         content = str(tool_result["content"])
                         if len(content) > 100:
                             content = content[:100] + "..."
-                        await evt.respond("!llm-tool-out: `" + content + "`")
+                        await self.trigger_event.respond("!llm-tool-out: `" + content + "`")
 
 
         response_text = "\n".join(message_parts)
         if (response_text in ['💤', '']):
-            await evt.react("💤")
+            await self.trigger_event.react("💤")
         else:
-            await evt.respond(response_text)
+            await self.trigger_event.respond(response_text)
