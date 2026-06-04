@@ -27,11 +27,18 @@ class MessageBuilder:
             cancellation_token.set_query(request)
             response = await request.resolve_request()
             if (cancellation_token.is_cancellation_requested()): return
-            if (response.get("choices", None) == None):
-                error = response.get("message", None)
-                code = response.get("code", None)
-                type = response.get("type", None)
-                logger.error(f'[maubot_llm] {code} {type}. {error}')
+            if (response.get("choices") == None):
+                error = response.get("error")
+                err_response = ""
+                if not error:
+                    err_response = str(response)
+                else:
+                    message = error.get("message", None)
+                    code = error.get("code", None)
+                    type = error.get("type", None)
+                    err_response = f'{code} {type}. {message}'
+                logger.error(f'[maubot_llm] {err_response}')
+                await evt.respond(f'!llm-err: {err_response}')
                 return
             
             prime_choice = response["choices"][0]
