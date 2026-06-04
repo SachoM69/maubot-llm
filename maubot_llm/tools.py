@@ -3,6 +3,7 @@ from aiohttp import ClientSession
 import datetime
 from html.parser import HTMLParser
 from .tool_base import LLMTool
+from .cancellation_token import LlmCancellationToken
 
 class GetDateTime(LLMTool):
     def GetName(self) -> str:
@@ -18,7 +19,7 @@ class GetDateTime(LLMTool):
             }
         }
     
-    async def Execute(self, evt: MessageEvent, http: ClientSession, args) -> dict:
+    async def Execute(self, evt: MessageEvent, http: ClientSession, args, token: LlmCancellationToken) -> dict:
         now = datetime.datetime.now()
         return {
             "current_timestamp": now.timestamp(),
@@ -51,7 +52,7 @@ class React(LLMTool):
             }
         }
     
-    async def Execute(self, evt: MessageEvent, http: ClientSession, args) -> dict:
+    async def Execute(self, evt: MessageEvent, http: ClientSession, args, token: LlmCancellationToken) -> dict:
         await evt.react(args["key"])
         return {"status": "success", "text": "Reaction was sent successfully"}
 
@@ -78,7 +79,7 @@ class FetchUrl(LLMTool):
             }
         }
     
-    async def Execute(self, evt: MessageEvent, http: ClientSession, args) -> dict:
+    async def Execute(self, evt: MessageEvent, http: ClientSession, args, token: LlmCancellationToken) -> dict:
         url = args["url"]
         html_custom_headers = {"User-Agent": "WhatsApp/2"}
         resp = await http.get(url, timeout=30, headers=html_custom_headers)

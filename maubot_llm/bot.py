@@ -13,6 +13,7 @@ from .tool_holder import get_default_tool_holder, LLMToolHolder
 from .backends import Backend, BasicOpenAIBackend
 from .cancellation_token import LlmCancellationToken
 from .message_builder import MessageBuilder
+import asyncio
 
 class Config(BaseProxyConfig):
     def do_update(self, helper: ConfigUpdateHelper) -> None:
@@ -234,14 +235,22 @@ class LlmBot(Plugin):
             
             if (my_token.is_cancellation_requested()): return
 
-            await self.message_builder.build_with_tools(evt, self.http, self.client, self.log,
+            typing_task = asyncio.create_task(self.typing_updater(evt.room_id))
+            my_token.add_task(typing_task)
+
+            build_coro = self.message_builder.build_with_tools(evt, self.http, self.log,
                                                         backend, model, system, context,
                                                         tool_cfg["enabled_tools"], tool_cfg["debug_messages"], my_token)
+            
+            build_task = asyncio.create_task(build_coro)
+            my_token.add_task(build_task)
+            await build_task
         except Exception as e:
             self.log.error(f'[maubot_llm] [handle_msg] {e}')
             raise
         finally:
             if (not my_token.is_cancellation_requested()):
+                my_token.cancel()
                 await self.client.set_typing(evt.room_id, 0)
     
     @classmethod
@@ -257,3 +266,13 @@ class LlmBot(Plugin):
             message_body += "\n<username>" + member.displayname + "</username>"
 
         return message_body
+        
+    async def typing_updater(self, room_id: RoomID):
+        while True:
+            try:
+                await self.client.set_typing(room_id, 30000)
+                await asyncio.sleep(29)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                await asyncio.sleep(5)

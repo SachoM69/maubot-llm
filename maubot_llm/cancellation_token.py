@@ -1,14 +1,34 @@
+from asyncio import Task
+from types import CoroutineType
+import asyncio
+
 class LlmCancellationToken():
     def __init__(self):
         self.cancellation_requested = False
-        self.dependent_query = None
+        self.dependent_tasks = []
 
-    def set_query(self, query):
-        self.dependent_query = query
+    cancellation_requested: bool
+    dependent_tasks: list[Task]
+
+    def add_task(self, task : Task):
+        self.dependent_tasks.append(task)
+
+    def remove_task(self, task: Task):
+        self.dependent_tasks.remove(task)
+
+    async def run_cancellable_coro(self, coro: CoroutineType):
+        task = asyncio.create_task(coro)
+        if self.cancellation_requested:
+            task.cancel()
+            return
+        self.add_task(task)
+        response = await task
+        self.remove_task(task)
+        return response
 
     def cancel(self):
-        if (self.dependent_query):
-            self.dependent_query.cancel()
+        for task in self.dependent_tasks:
+            task.cancel()
         self.cancellation_requested = True
 
     def is_cancellation_requested(self):

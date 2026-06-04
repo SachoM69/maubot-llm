@@ -3,6 +3,7 @@ from aiohttp import ClientSession
 from .tool_base import LLMTool
 from .tools import React, GetDateTime, FetchUrl
 from logging import Logger
+from .cancellation_token import LlmCancellationToken
 
 def get_default_tool_holder(logger: Logger):
     return LLMToolHolder([React, GetDateTime, FetchUrl], logger)
@@ -33,10 +34,10 @@ class LLMToolHolder:
             })
         return result
     
-    async def call_tool(self, tool_name, call_id, evt: MessageEvent, http: ClientSession, args):
+    async def call_tool(self, tool_name, call_id, evt: MessageEvent, http: ClientSession, args, token: LlmCancellationToken):
         result = None
         try:
-            result = await self.tools[tool_name].Execute(evt, http, args)
+            result = await self.tools[tool_name].Execute(evt, http, args, token)
         except Exception as e:
             result = {"error": str(e)}
         if result == None:
