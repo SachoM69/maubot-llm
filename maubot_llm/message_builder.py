@@ -49,7 +49,8 @@ class MessageBuilder:
                 return
             
             prime_choice = response["choices"][0]
-            message_parts.append(prime_choice["message"]["content"])
+            if prime_choice["message"]["content"] != '':
+                message_parts.append(prime_choice["message"]["content"])
             if prime_choice["finish_reason"] != "tool_calls":
                 break
 
